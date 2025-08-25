@@ -237,7 +237,7 @@ impl CoreBPE {
         ret
     }
 
-    pub fn find_next_special_token(
+    fn find_next_special_token(
         &self,
         text: &str,
         start: usize,
@@ -247,26 +247,27 @@ impl CoreBPE {
         let mut found_token = None;
         let mut to_remove = Vec::new();
         for (&token_str, v) in next_special_cache.iter_mut() {
-            if v.is_none() || v.unwrap() < start {
-                let text_start = text.get(start..);
-                match text_start {
-                    Some(text_start_pos) => {
-                        let pos = text_start_pos.find(token_str);
-                        *v = match pos {
-                            Some(p) => Some(p),
-                            None => *v,
-                        };
-                        min_position = match (min_position, pos) {
-                            (Some(min_pos), Some(p)) if p < min_pos => Some(p),
-                            (None, Some(p)) => Some(p),
-                            _ => min_position,
-                        }
-                    },
-                    None => { 
-                        to_remove.push(token_str)
+            if v.is_none() || v.unwrap() < start { 
+                // v is not cached, check for it
+                let text_start = text.get(start..).unwrap();
+                let pos = text_start.find(token_str);
+                *v = match pos {
+                    Some(p) => Some(p),
+                    None => None,
+                };
+                (min_position, found_token) = match (min_position, pos) {
+                    (Some(min_pos), Some(p)) if p < min_pos => (Some(p), Some(token_str.to_string())),
+                    (None, Some(p)) => (Some(p), Some(token_str.to_string())),
+                    (_, None) => {
+                        // the special token DNE!
+                        // Note: do not remove cache entry if encoder is streaming.
+                        to_remove.push(token_str);
+                        (min_position, found_token)
                     }
+                    _ => (min_position, found_token),
                 }
-            } else {
+            } else { 
+                // v is a cached, valid index
                 let pos = *v;
                 (min_position, found_token) = match (min_position, pos) {
                     (Some(min_pos), Some(p)) if p < min_pos => (pos, Some(token_str.to_string())),
@@ -297,23 +298,18 @@ impl CoreBPE {
             .collect();
 
         loop {
-            let mut next_special = None;
+            let mut next_special_token = None;
             let mut next_special_token_pos = None;
-            loop {
-                // Find the next allowed special token, if any
-                let (pos, token) = self.find_next_special_token(text, start, &mut next_special_cache);
-                match pos {
-                    Some(_) =>  {
-                        next_special = token;
-                        next_special_token_pos = pos;
-                    }
-                    None => break,
+            // Find the next allowed special token, if any
+            let (pos, token) = self.find_next_special_token(text, start, &mut next_special_cache);
+            match token {
+                Some(_) =>  {
+                    next_special_token = token;
+                    next_special_token_pos = pos;
                 }
+                None => {},
             }
-            let end = match next_special_token_pos {
-                Some(pos) => pos,
-                None => text.len() as usize,
-            };
+            let end: usize = next_special_token_pos.unwrap_or(text.len() as usize);
 
             // Okay, here we go, compare this logic to encode_ordinary
             for mat_res in regex.find_iter(&text[start..end]) {
@@ -338,7 +334,7 @@ impl CoreBPE {
             }
 
             // And here we push the special token
-            match next_special {
+            match next_special_token {
                 Some(next_special_token) => {
                     let token = self.special_tokens_encoder[next_special_token.as_str()];
                     ret.push(token);
@@ -579,10 +575,10 @@ impl CoreBPE {
 
 #[cfg(test)]
 mod tests {
-    use fancy_regex::Regex;
     use rustc_hash::FxHashMap as HashMap;
+    use std::collections::HashSet;
 
-    use crate::{Rank, byte_pair_split};
+    use crate::{byte_pair_split, CoreBPE, Rank};
 
     fn setup_ranks() -> HashMap<Vec<u8>, Rank> {
         HashMap::from_iter([(b"ab".to_vec(), 0), (b"cd".to_vec(), 1)])
@@ -600,5 +596,40 @@ mod tests {
         let ranks = setup_ranks();
         let res = byte_pair_split(b"abab", &ranks);
         assert_eq!(res, vec![b"ab", b"ab"]);
+    }
+
+    #[test]
+    fn test_next_special_token() {
+        let core_bpe = CoreBPE::new_internal(
+            HashMap::from_iter([(b"hello".to_vec(), 0), (b" ".to_vec(), 1)]),
+            HashMap::from_iter([("<|endoftext|>".to_string(), 2), ("<|fim_prefix|>".to_string(), 3)]),
+            r"\S+|\s+",
+        ).unwrap();
+        let text = "<|endoftext|> hello <|fim_prefix|>";
+        let start: usize = 0;
+        let mut next_special_cache : HashMap<&str, Option<usize>> = HashMap::from_iter([("<|endoftext|>", None), ("<|fim_prefix|>", None)]);
+        let (_, token) = core_bpe.find_next_special_token(text, start, &mut next_special_cache);
+        assert_eq!(token.unwrap(), "<|endoftext|>")
+    }
+
+    #[test]
+    fn test_next_special_token_end() {
+        let core_bpe = CoreBPE::new_internal(
+            HashMap::from_iter([(b"hello".to_vec(), 0), (b" ".to_vec(), 1)]),
+            HashMap::from_iter([("<|endoftext|>".to_string(), 2), ("<|fim_prefix|>".to_string(), 3)]),
+            r"\S+|\s+",
+        ).unwrap();
+        let text = "<|endoftext|> hello <|fim_prefix|>";
+        let mut start: usize = 0;
+        let mut next_special_cache : HashMap<&str, Option<usize>> = HashMap::from_iter([("<|endoftext|>", None), ("<|fim_prefix|>", None)]);
+        let mut tok: Option<&str> = Some("");
+        loop {
+            let (pos, token) = core_bpe.find_next_special_token(text, start, &mut next_special_cache);
+            match token {
+                Some(t) => {start = pos.unwrap() + t.len() }
+                None => {tok = None; break;}
+            }
+        }
+        assert_eq!(tok.unwrap_or("true"), "true")
     }
 }
