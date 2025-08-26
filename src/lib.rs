@@ -250,13 +250,17 @@ impl CoreBPE {
             if v.is_none() || v.unwrap() < start { 
                 // v is not cached, check for it
                 let text_start = text.get(start..).unwrap();
-                let pos = text_start.find(token_str);
+                let find_pos = text_start.find(token_str);
+                let pos = match find_pos {
+                    Some(p) => Some(p + start),
+                    None => None,
+                };
                 *v = match pos {
                     Some(p) => Some(p),
                     None => None,
                 };
                 (min_position, found_token) = match (min_position, pos) {
-                    (Some(min_pos), Some(p)) if p < min_pos => (Some(p), Some(token_str.to_string())),
+                    (Some(min_pos), Some(p)) if (p) < min_pos => (Some(p), Some(token_str.to_string())),
                     (None, Some(p)) => (Some(p), Some(token_str.to_string())),
                     (_, None) => {
                         // the special token DNE!
@@ -631,5 +635,20 @@ mod tests {
             }
         }
         assert_eq!(tok.unwrap_or("true"), "true")
+    }
+
+    #[test]
+    fn test_next_special_token_encode() {
+        let core_bpe = CoreBPE::new_internal(
+            HashMap::from_iter([(b"hello".to_vec(), 0), (b" ".to_vec(), 1)]),
+            HashMap::from_iter([("<|endoftext|>".to_string(), 2), ("<|fim_prefix|>".to_string(), 3)]),
+            r"\S+|\s+",
+        ).unwrap();
+        let text = "<|endoftext|> hello <|endoftext|>";
+        let mut start: usize = 0;
+        let mut special_tokens : HashSet<&str> = HashSet::from_iter(["<|endoftext|>", "<|fim_prefix|>"]);
+        let mut tok: Option<&str> = Some("");
+        let res= core_bpe.encode(text, &special_tokens);
+        println!("{:?}", res);
     }
 }
